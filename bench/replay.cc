@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -84,7 +85,8 @@ Result Replay(const std::vector<Op>& ops, uint32_t max_id, AllocFn&& alloc, Free
   size_t samples = 0;
   uint64_t failed = 0;
   std::chrono::nanoseconds busy{0};
-  constexpr size_t kSampleEvery = 512;
+  // ~4k samples per run, so short traces still get a real peak.
+  const size_t kSampleEvery = std::max<size_t>(1, ops.size() / 4096);
 
   for (size_t i = 0; i < ops.size(); ++i) {
     const Op& op = ops[i];
@@ -111,11 +113,18 @@ Result Replay(const std::vector<Op>& ops, uint32_t max_id, AllocFn&& alloc, Free
       ++samples;
     }
   }
+  // Recorded traces can end with buffers still live; free them so the last
+  // column really is "after everything was freed".
+  for (void*& p : slots)
+    if (p) {
+      release(p);
+      p = nullptr;
+    }
   Result res{};
   res.ns_per_op = double(busy.count()) / double(ops.size());
   res.peak_rss_mb = peak;
   res.avg_rss_mb = samples ? sum / double(samples) : 0;
-  res.final_rss_mb = RssMb() - base;
+  res.final_rss_mb = std::max(0.0, RssMb() - base);  // can dip below the baseline
   res.failed = failed;
   return res;
 }

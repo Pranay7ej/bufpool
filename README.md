@@ -61,52 +61,72 @@ CI runs all three.
 `bufpool_bench` replays allocation traces against glibc malloc and each return
 policy. Every run happens in a forked child so RSS doesn't leak between runs, and
 every allocation touches its pages like a real producer would. RSS comes from
-`/proc/self/statm`, sampled every 512 ops.
+`/proc/self/statm`.
 
-Traces in `bench/traces/` come from `bench/gen_trace.py`, which fakes a player's
-heap for 10 minutes of playback:
+Traces in `bench/traces/`:
 
-- `steady` — one quality, buffer sitting near full
-- `seeky` — a seek every 20 s, so everything buffered gets dropped and refilled
-- `abr` — quality changes every 15 s, so the dominant sizes keep moving
+- `steady`, `seeky`, `abr` come from `bench/gen_trace.py`, which fakes a
+  player's heap (network chunks, packets, decoded frames) for 10 minutes:
+  one quality with a full buffer; a seek every 20 s that drops and refills
+  everything; quality changes every 15 s so the dominant sizes keep moving
+- `tinyplayer_drop`, `tinyplayer_fluct` are recorded from
+  [tinyplayer](https://github.com/Pranay7ej/tinyplayer)'s SourceBuffer
+  (`--alloc-trace`): only the downloaded segment buffers, 0.4–3 MB each, over
+  10 minutes of playback on two network traces
 
 ```sh
 ./build/bufpool_bench bench/traces/*.txt
 ./build/bufpool_bench --budget 24 bench/traces/abr.txt   # with a hard cap
 ```
 
-Results on a 2-core Xeon VM, no budget:
+Results on a 2-core Xeon VM, no budget. RSS is sampled ~4k times per run.
 
 | trace | allocator | ns/op | peak RSS MB | avg RSS MB | RSS after free MB |
 |---|---|---:|---:|---:|---:|
-| steady | malloc | 146 | 16.9 | 15.7 | 14.7 |
-| steady | pool/immediate | 5060 | 17.7 | 15.8 | 0.8 |
-| steady | pool/threshold | 187 | 20.7 | 19.4 | 0.8 |
-| steady | pool/never | 176 | 20.7 | 19.4 | 20.7 |
-| seeky | malloc | 177 | 14.4 | 11.3 | 9.4 |
-| seeky | pool/immediate | 4158 | 14.7 | 9.1 | 0.8 |
-| seeky | pool/threshold | 272 | 16.9 | 10.7 | 2.0 |
-| seeky | pool/never | 143 | 17.8 | 16.5 | 17.8 |
-| abr | malloc | 192 | 33.7 | 27.3 | 13.8 |
-| abr | pool/immediate | 5549 | 34.1 | 18.9 | 0.9 |
-| abr | pool/threshold | 358 | 40.5 | 23.1 | 6.2 |
-| abr | pool/never | 202 | 60.3 | 49.6 | 60.3 |
+| steady | malloc | 178 | 15.9 | 15.1 | 15.9 |
+| steady | pool/immediate | 4388 | 17.6 | 15.7 | 0.7 |
+| steady | pool/threshold | 205 | 20.6 | 19.3 | 0.7 |
+| steady | pool/never | 177 | 20.6 | 19.3 | 20.6 |
+| seeky | malloc | 164 | 14.4 | 11.1 | 9.4 |
+| seeky | pool/immediate | 3450 | 15.6 | 9.2 | 0.8 |
+| seeky | pool/threshold | 250 | 16.9 | 10.8 | 2.0 |
+| seeky | pool/never | 125 | 17.8 | 16.6 | 17.8 |
+| abr | malloc | 222 | 36.2 | 28.3 | 28.4 |
+| abr | pool/immediate | 5872 | 35.5 | 19.1 | 1.1 |
+| abr | pool/threshold | 341 | 40.9 | 23.3 | 6.3 |
+| abr | pool/never | 162 | 60.4 | 49.9 | 60.4 |
+| tinyplayer_drop | malloc | 4071 | 13.6 | 10.7 | 3.1 |
+| tinyplayer_drop | pool/immediate | 25350 | 13.9 | 10.1 | 0.9 |
+| tinyplayer_drop | pool/threshold | 14861 | 20.9 | 13.5 | 7.9 |
+| tinyplayer_drop | pool/never | 1001 | 42.8 | 33.5 | 42.8 |
+| tinyplayer_fluct | malloc | 2004 | 18.1 | 13.3 | 0.0 |
+| tinyplayer_fluct | pool/immediate | 14771 | 18.9 | 12.6 | 0.9 |
+| tinyplayer_fluct | pool/threshold | 5109 | 24.1 | 16.3 | 4.6 |
+| tinyplayer_fluct | pool/never | 638 | 36.7 | 33.3 | 36.7 |
 
 What I took away from it:
 
 - **The pool doesn't beat malloc on peak memory.** Power-of-two classes waste
-  space: a 10 KB packet sits in a 16 KB slot. On the steady trace that's ~20%
+  space: a 10 KB packet sits in a 16 KB slot. On the steady trace that's ~30%
   more peak RSS. Finer classes (or a couple of classes tuned to your frame
   sizes) would fix most of it.
-- **Where it wins is giving memory back.** After the burst is over, malloc is
-  still holding 9–15 MB. The pool with a return policy drops to ~1 MB. On a
-  device that's switching between apps, that's the number that matters.
-- **Immediate return is way too expensive.** One `madvise` per free is ~25x
-  slower per op, and it doesn't even count the page faults you pay when the
-  memory gets reused. The threshold policy gets nearly the same average RSS for
-  about the cost of malloc.
-- **Never returning is the worst of both** on the ABR trace: every quality you
-  ever played stays resident, 60 MB for a player that only needed ~34.
+- **Where it wins is giving memory back.** On the synthetic traces malloc is
+  still holding 9–28 MB after everything was freed (glibc only trims the top
+  of the heap, and how much it keeps varies run to run). The pool with a
+  return policy drops to ~1 MB.
+- **Immediate return is way too expensive.** One `madvise` per free is ~20x
+  slower per op, and that doesn't even count the page faults you pay when the
+  memory gets reused. The threshold policy gets close on average RSS for about
+  the cost of malloc.
+- **Never returning is the worst of both** on anything with changing sizes:
+  every quality you ever played stays resident, 60 MB for a player that needed
+  ~36.
+- **The tinyplayer traces are a different world.** They're all multi-MB
+  segment buffers, so everything goes through the large-mapping path, and here
+  glibc is already good: it `mmap`s big blocks and unmaps them on free. The
+  pool's large-block cache only helps when sizes repeat, and segment sizes
+  don't (VBR). If I were using this in the player I'd leave segments on
+  malloc and pool the small stuff.
 - With `--budget 24` the ABR trace needs more than 24 MB at 720p, so ~4.4k
   allocations fail instead of the process growing. That's the point, but it also
   means the caller has to actually handle `nullptr`.
