@@ -13,7 +13,7 @@ jobs:
         sanitize: ["", "address", "thread"]
     name: build (${{ matrix.sanitize || 'plain' }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S . -B build -DBUFPOOL_SANITIZE=${{ matrix.sanitize }}
       - name: Build
