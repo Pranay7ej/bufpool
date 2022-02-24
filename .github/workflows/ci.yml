@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitize: ["", "address", "thread"]
+    name: build (${{ matrix.sanitize || 'plain' }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DBUFPOOL_SANITIZE=${{ matrix.sanitize }}
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Bench (smoke)
+        if: matrix.sanitize == ''
+        run: ./build/bufpool_bench bench/traces/steady.txt
