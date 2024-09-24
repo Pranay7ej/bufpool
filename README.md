@@ -1,6 +1,6 @@
 # bufpool
 
-Memory pool for programs that allocate a lot of similar-sized buffers and have a hard memory limit (think a video player on a cheap TV box). Wanted to see if a simple size-class pool with a "give pages back to the OS" policy actually beats malloc for this.
+Memory pool for programs that allocate a lot of similar-sized buffers and have a hard memory limit (like a video player on a low-memory device). Wanted to see if a simple size-class pool with a "give pages back to the OS" policy actually beats malloc for this.
 
 Short answer: not on speed or peak memory, but yes on giving memory back.
 
